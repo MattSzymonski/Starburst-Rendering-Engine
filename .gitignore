@@ -29,7 +29,6 @@ bld/
 
 
 # Project Settings (for library paths)
-*.vcxproj
 *.vcxproj.user
 *.vcxproj.filters
 
