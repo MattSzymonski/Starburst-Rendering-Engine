@@ -29,7 +29,7 @@ TODO
 
 const int WIDTH = 800;
 const int HEIGHT = 600;
-const int MAX_FRAMES_IN_FLIGHT = 2;
+const int MAX_FRAMES_IN_FLIGHT = 2; // Maximum number of frames that can be processed concurrently
 
 const bool PRINT_AVAILABLE_VULKAN_LAYERS = true;
 const bool PRINT_AVAILABLE_VULKAN_EXTENSIONS = true;
@@ -127,17 +127,28 @@ private:
 	VkCommandPool commandPool; // Manage the memory that is used to store the buffers
 	std::vector<VkCommandBuffer> commandBuffers;
 
-	std::vector<VkSemaphore> imageAvailableSemaphores;
-	std::vector<VkSemaphore> renderFinishedSemaphores;
-	std::vector<VkFence> inFlightFences;
-	size_t currentFrame = 0;
+	std::vector<VkSemaphore> imageAvailableSemaphores; // Set of semaphores for each frame in pool
+	std::vector<VkSemaphore> renderFinishedSemaphores; // Set of semaphores for each frame in pool
+	std::vector<VkFence> inFlightFences; // 
+	std::vector<VkFence> imagesInFlight;
+	size_t currentFrame = 0; // Frame index (used to use the right pair of semaphores every time)
+
+	bool framebufferResized = false;
 
 	void initWindow()
 	{
 		glfwInit();
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-		glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+		//glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 		window = glfwCreateWindow(WIDTH, HEIGHT, "Starburst Rendering Engine", nullptr, nullptr);
+		glfwSetWindowUserPointer(window, this);
+		glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+	}
+
+	static void framebufferResizeCallback(GLFWwindow* window, int width, int height) // Additional window resizing detection using GLFW function (Vulkan should detect resizes itself but it is not always guaranteed)
+	{
+		auto app = reinterpret_cast<StarburstRenderingEngine*>(glfwGetWindowUserPointer(window));
+		app->framebufferResized = true;
 	}
 
 	void initVulkan()
@@ -165,11 +176,13 @@ private:
 			drawFrame();
 		}
 
-		vkDeviceWaitIdle(device);
+		vkDeviceWaitIdle(device); // Wait for all the asynchronous rendering operations to finish and then close the program (to avoid errors when closing program in the middle of processing)
 	}
 
 	void cleanup()
 	{
+		cleanupSwapChain();
+
 		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 		{
 			vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
@@ -179,10 +192,29 @@ private:
 
 		vkDestroyCommandPool(device, commandPool, nullptr);
 
+		vkDestroyDevice(device, nullptr);
+
+		if (ENABLE_VALIDATION_LAYERS)
+		{
+			DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+		}
+
+		vkDestroySurfaceKHR(instance, surface, nullptr);
+		vkDestroyInstance(instance, nullptr);
+
+		glfwDestroyWindow(window);
+
+		glfwTerminate();
+	}
+
+	void cleanupSwapChain()
+	{
 		for (auto framebuffer : swapChainFramebuffers)
 		{
 			vkDestroyFramebuffer(device, framebuffer, nullptr);
 		}
+
+		vkFreeCommandBuffers(device, commandPool, static_cast<uint32_t>(commandBuffers.size()), commandBuffers.data());
 
 		vkDestroyPipeline(device, graphicsPipeline, nullptr);
 		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
@@ -194,16 +226,29 @@ private:
 		}
 
 		vkDestroySwapchainKHR(device, swapChain, nullptr);
-		vkDestroyDevice(device, nullptr);
-		if (ENABLE_VALIDATION_LAYERS)
+	}
+
+
+
+	void recreateSwapChain()
+	{
+		int width = 0, height = 0;
+		while (width == 0 || height == 0) // If window is minimalized, stop execution
 		{
-			DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+			glfwGetFramebufferSize(window, &width, &height);
+			glfwWaitEvents();
 		}
 
-		vkDestroySurfaceKHR(instance, surface, nullptr);
-		vkDestroyInstance(instance, nullptr);
-		glfwDestroyWindow(window);
-		glfwTerminate();
+		vkDeviceWaitIdle(device);
+
+		cleanupSwapChain(); // Wait for all the asynchronous rendering operations to finish and then close the program (to avoid errors when closing program in the middle of processing)
+
+		createSwapChain();
+		createImageViews();
+		createRenderPass();
+		createGraphicsPipeline();
+		createFramebuffers();
+		createCommandBuffers();
 	}
 
 	void createInstance()
@@ -437,12 +482,24 @@ private:
 		//subpass.pDepthStencilAttachment = ; // Attachment for depth and stencil data
 		//subpass.pPreserveAttachments = ; // Attachments that are not used by this subpass, but for which the data must be preserved
 
+		VkSubpassDependency dependency = {}; // Specify the indices of the dependency and the dependent subpass - Controls image layout transitions (memory and execution dependencies between subpasses)
+		dependency.srcSubpass = VK_SUBPASS_EXTERNAL; // Implicit subpass on rendering start (VK_SUBPASS_EXTERNAL - Implicit/hidder subpass)
+		dependency.dstSubpass = 0; // Our subpass (zero index)
+		dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // Specify the operations to wait on (Wait for the swap chain to finish reading from the image before we can access it)
+		dependency.srcAccessMask = 0; // Stages in which these operations occur (waiting on the color attachment output stage)
+		dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // Specify the operations to wait on
+		dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; // Stages in which these operations occur
+		// The operations that should wait on this are in the color attachment stage and involve the reading and writing of the color attachment. These settings will prevent the transition from happening until it's actually necessary (and allowed)
+
+
 		VkRenderPassCreateInfo renderPassInfo = {}; // Actual render pass
 		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 		renderPassInfo.attachmentCount = 1;
 		renderPassInfo.pAttachments = &colorAttachment;
 		renderPassInfo.subpassCount = 1;
 		renderPassInfo.pSubpasses = &subpass;
+		renderPassInfo.dependencyCount = 1;
+		renderPassInfo.pDependencies = &dependency;
 
 		if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS)
 		{
@@ -785,7 +842,13 @@ private:
 		}
 		else // Picks the resolution that best matches the window within the minImageExtent and maxImageExtent bounds
 		{
-			VkExtent2D actualExtent = { WIDTH, HEIGHT };
+			int width, height;
+			glfwGetFramebufferSize(window, &width, &height); // Query the current size of the framebuffer to make sure that the swapchain images have the (new) right size
+
+			VkExtent2D actualExtent = {
+				static_cast<uint32_t>(width),
+				static_cast<uint32_t>(height)
+			};
 
 			actualExtent.width = std::max(capabilities.minImageExtent.width, std::min(capabilities.maxImageExtent.width, actualExtent.width));
 			actualExtent.height = std::max(capabilities.minImageExtent.height, std::min(capabilities.maxImageExtent.height, actualExtent.height));
@@ -919,18 +982,20 @@ private:
 
 	void createSyncObjects()
 	{
-		imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-		renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-		inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+		imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT); // Set of semaphores for each frame in pool
+		renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT); // Set of semaphores for each frame in pool
+		inFlightFences.resize(MAX_FRAMES_IN_FLIGHT); // Set of fences for each frame in pool
+		imagesInFlight.resize(swapChainImages.size(), VK_NULL_HANDLE); // Track for each swap chain image if a frame in flight is currently using it to avoid desynchronization when there are more images than fences etc
+
 
 		VkSemaphoreCreateInfo semaphoreInfo = {};
 		semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
 		VkFenceCreateInfo fenceInfo = {};
 		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-		fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+		fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // Set fence state to signaled
 
-		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) // For each frame in pool create sync objects
 		{
 			if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
 				vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
@@ -943,29 +1008,46 @@ private:
 
 	void drawFrame()
 	{
-		vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-		vkResetFences(device, 1, &inFlightFences[currentFrame]);
+		vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX); // Wait for frame to be finished and then start rendering new data to it
 
 		uint32_t imageIndex;
-		vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex); // Aquire image from swapchain. When operation is finished sync object is signaled. Last parameter is index of available VkImage in swapchainImages array (using UINT64_MAX for image availability delay disables it)
+		VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex); // Start waiting for image from swapchain. When image becomes available sync object is signaled. Last parameter is index of available VkImage in swapchainImages array (using UINT64_MAX for image availability delay disables it)
 
+		if (result == VK_ERROR_OUT_OF_DATE_KHR) // Check if swapchain is still compatible with the surface (and cannot be used for rendering any longer)
+		{
+			recreateSwapChain();
+			return;
+		}
+		else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+		{
+			throw std::runtime_error("failed to acquire swap chain image!");
+		}
+
+		if (imagesInFlight[imageIndex] != VK_NULL_HANDLE) // Check if a previous frame is using this image (i.e. there is its fence to wait on)
+		{
+			vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+		}
+		
+		imagesInFlight[imageIndex] = inFlightFences[currentFrame]; // Mark the image as now being in use by this frame
 
 		VkSubmitInfo submitInfo = {}; // Queue submission and synchronization
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] }; // Specifies for which semaphores to wait before execution begins
-		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT }; // Specifies for which stage(s) of the pipeline to wait (Here the stage of the graphics pipeline that writes to the color attachment) (That means that theoretically the implementation can already start executing our vertex shader and such while the image is not yet available)
+		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT }; // Specifies before which stage(s) of the pipeline to wait (Here the stage of the graphics pipeline that writes to the color attachment) (That means that theoretically the implementation can already start executing our vertex shader and such while the image is not yet available)
 		submitInfo.waitSemaphoreCount = 1;
 		submitInfo.pWaitSemaphores = waitSemaphores;
 		submitInfo.pWaitDstStageMask = waitStages;
 
 		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &commandBuffers[imageIndex]; // Specify to which command buffer submit for (we should submit the command buffer that binds the swap chain image we just acquired as color attachment)
+		submitInfo.pCommandBuffers = &commandBuffers[imageIndex]; // Specify to which command buffer submit for (we should submit the command buffer that binds the swapchain image we just acquired as color attachment)
 
 		VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] }; // To which semaphores send signal when command buffer(s) have finished execution
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = signalSemaphores;
 
-		if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) // Submit the command buffer to the graphics queue
+		vkResetFences(device, 1, &inFlightFences[currentFrame]); // Restore the fence to the unsignaled state
+
+		if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) // Submit the command buffer to the graphics queue (fence that will be signaled when command buffer finishes execution)
 		{
 			throw std::runtime_error("failed to submit draw command buffer!");
 		}
@@ -974,17 +1056,28 @@ private:
 		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 
 		presentInfo.waitSemaphoreCount = 1;
-		presentInfo.pWaitSemaphores = signalSemaphores;
+		presentInfo.pWaitSemaphores = signalSemaphores; // Specify which semaphores to wait on before presentation can happen
 
 		VkSwapchainKHR swapChains[] = { swapChain };
 		presentInfo.swapchainCount = 1;
 		presentInfo.pSwapchains = swapChains;
-
 		presentInfo.pImageIndices = &imageIndex;
+		presentInfo.pResults = nullptr; // Optional Allows to specify an array of VkResult to check for every individual swapchain if presentation was successful
 
-		vkQueuePresentKHR(presentQueue, &presentInfo);
+		result = vkQueuePresentKHR(presentQueue, &presentInfo); // Submits the request to present an image to the swap chain
 
-		currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) // Check if swapchain is still compatible with the surface (and cannot be used for rendering any longer)
+		{
+			framebufferResized = false;
+			recreateSwapChain();
+		}
+		else if (result != VK_SUCCESS)
+		{
+			throw std::runtime_error("failed to present swap chain image!");
+		}
+
+
+		currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT; // Advance to the next frame
 	}
 
 	bool isDeviceSuitable(VkPhysicalDevice device)
