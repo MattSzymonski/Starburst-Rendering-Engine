@@ -683,9 +683,9 @@ private:
 		//subpass.pPreserveAttachments = ; // Attachments that are not used by this subpass, but for which the data must be preserved
 
 		VkSubpassDependency dependency = {}; // Specify the indices of the dependency and the dependent subpass - Controls image layout transitions (memory and execution dependencies between subpasses)
-		dependency.srcSubpass = VK_SUBPASS_EXTERNAL; // Implicit subpass on rendering start (VK_SUBPASS_EXTERNAL - Implicit/hidder subpass)
-		dependency.dstSubpass = 0; // Our subpass (zero index)
-		dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // Specify the operations to wait on (Wait for the swap chain to finish reading from the image before we can access it)
+		dependency.srcSubpass = VK_SUBPASS_EXTERNAL; // Dependency subpass - Implicit subpass on rendering start (VK_SUBPASS_EXTERNAL - Implicit/hidder subpass)
+		dependency.dstSubpass = 0; // Dependent subpass - Our subpass (zero index)
+		dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // Specify the operations to wait on (Wait for the swapchain to finish reading from the image before we can access it)
 		dependency.srcAccessMask = 0; // Stages in which these operations occur (waiting on the color attachment output stage)
 		dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // Specify the operations to wait on
 		dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; // Stages in which these operations occur
@@ -872,7 +872,6 @@ private:
 		pipelineInfo.subpass = 0;
 		pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional (To create a new graphics pipeline by deriving from an existing pipeline - less expensive than creating new)
 		pipelineInfo.basePipelineIndex = -1; // Optional
-
 
 		if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) // Can create multiple pipelines in a single call
 		{
@@ -1761,7 +1760,7 @@ private:
 			throw std::runtime_error("failed to allocate command buffers!");
 		}
 
-		for (size_t i = 0; i < commandBuffers.size(); i++) // Command buffer recording (for every framebuffer)
+		for (size_t i = 0; i < commandBuffers.size(); i++) // Command buffer recording (for every framebuffer/swapchain image)
 		{
 			VkCommandBufferBeginInfo beginInfo = {};
 			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
